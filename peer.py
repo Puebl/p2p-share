@@ -15,43 +15,50 @@ async def get_peers(tracker_url: str, room: str):
 
 async def receive(tracker: str, room: str, out_dir: str):
     os.makedirs(out_dir, exist_ok=True)
-    self_id, others = await get_peers(tracker, room)
+    _self_id, _others = await get_peers(tracker, room)
     pc = RTCPeerConnection()
 
-    channel = pc.createDataChannel("file")
+    start_time = None
+    total_bytes = 0
+    current_file = None
+    f = None
 
-    @channel.on("message")
-    def on_message(message):
-        nonlocal start_time, total_bytes, current_file, f
-        if isinstance(message, str) and message.startswith("META:"):
-            meta = json.loads(message[5:])
-            current_file = os.path.join(out_dir, meta["name"])
-            f = open(current_file, "wb")
-            start_time = time.time()
-            total_bytes = 0
-        elif message == BYE:
-            if f:
-                f.close()
-            if start_time:
-                dt = max(time.time() - start_time, 1e-6)
-                print(f"Done. {total_bytes/1e6:.2f} MB in {dt:.2f}s => {total_bytes/1e6/dt:.2f} MB/s")
-        else:
-            if isinstance(message, (bytes, bytearray)):
-                f.write(message)
-                total_bytes += len(message)
+    @pc.on("datachannel")
+    def on_datachannel(channel):
+        @channel.on("message")
+        def on_message(message):
+            nonlocal start_time, total_bytes, current_file, f
+            if isinstance(message, str) and message.startswith("META:"):
+                meta = json.loads(message[5:])
+                current_file = os.path.join(out_dir, meta["name"])
+                os.makedirs(os.path.dirname(current_file), exist_ok=True)
+                f = open(current_file, "wb")
+                start_time = time.time()
+                total_bytes = 0
+            elif message == BYE:
+                if f:
+                    f.close()
+                    f = None
+                if start_time is not None:
+                    dt = max(time.time() - start_time, 1e-6)
+                    print(f"Done. {total_bytes/1e6:.2f} MB in {dt:.2f}s => {total_bytes/1e6/dt:.2f} MB/s")
+            else:
+                if isinstance(message, (bytes, bytearray)) and f is not None:
+                    f.write(message)
+                    total_bytes += len(message)
 
-    await pc.setLocalDescription(await pc.createOffer())
-
-    print("Receiver SDP (offer):\n", pc.localDescription.sdp[:120], "...")
-
-    # For MVP, we do not do full signaling via tracker; run on same machine to copy/paste SDP
-    answer_sdp = input("Paste sender ANSWER SDP and press Enter (end with empty line):\n")
-    await pc.setRemoteDescription(RTCSessionDescription(sdp=answer_sdp, type="answer"))
+    # Manual signaling: paste offer from sender, produce answer
+    offer_sdp = input("Paste SENDER OFFER SDP, then press Enter:\n")
+    await pc.setRemoteDescription(RTCSessionDescription(sdp=offer_sdp, type="offer"))
+    await pc.setLocalDescription(await pc.createAnswer())
+    print("Receiver ANSWER SDP (copy to sender):\n")
+    print(pc.localDescription.sdp)
+    print("--- END ANSWER ---")
 
     await asyncio.Event().wait()
 
 async def send(tracker: str, room: str, file_path: str):
-    self_id, others = await get_peers(tracker, room)
+    _self_id, _others = await get_peers(tracker, room)
     pc = RTCPeerConnection()
 
     channel = pc.createDataChannel("file")
@@ -62,8 +69,10 @@ async def send(tracker: str, room: str, file_path: str):
 
     await pc.setLocalDescription(await pc.createOffer())
     offer_sdp = pc.localDescription.sdp
-    print("Sender SDP (offer):\n", offer_sdp[:120], "...")
-    answer_sdp = input("Paste receiver ANSWER SDP and press Enter (end with empty line):\n")
+    print("Sender OFFER SDP (copy to receiver):\n")
+    print(offer_sdp)
+    print("--- END OFFER ---")
+    answer_sdp = input("Paste RECEIVER ANSWER SDP, then press Enter:\n")
     await pc.setRemoteDescription(RTCSessionDescription(sdp=answer_sdp, type="answer"))
 
     await asyncio.Event().wait()
